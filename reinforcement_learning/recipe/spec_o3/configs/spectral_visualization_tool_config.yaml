@@ -1,0 +1,24 @@
+tools:
+  - class_name: "recipe.astro.spectral_visualization_tool.SpectralVisualizationTool"
+    config:
+      num_workers: 256
+      rate_limit: 256
+      timeout: 60
+      type: native
+    tool_schema:
+      type: "function"
+      function:
+        name: "spectral_visualization_tool"
+        description: "A tool for visualizing spectral data with wavelength range zooming capabilities."
+        parameters:
+          type: "object"  
+          properties:
+            wavelength_range:
+              type: "array"
+              items:
+                type: "number"
+              description: "Wavelength range to focus on [min_wavelength, max_wavelength] in Angstroms"
+            label:
+              type: "string"
+              description: "Optional label for the spectral feature being analyzed"
+          required: ["wavelength_range"]

@@ -1,0 +1,155 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  train_files:
+    - /path/to/your/train_data.parquet
+  val_files:
+    - /path/to/your/val_data.parquet
+  max_prompt_length: 2048
+  max_response_length: 32768
+  train_batch_size: 64
+  return_raw_chat: true
+  filter_overlong_prompts: false
+  return_multi_modal_inputs: false
+  dataloader_num_workers: 1
+  # custom_cls:
+  #   path: "recipe/astro/astro.py"
+  #   name: CustomRLHFDataset
+
+actor_rollout_ref:
+  model:
+    path: /path/to/your/model/checkpoint
+    custom_chat_template: |-
+      {% set image_count = namespace(value=0) %}
+      {% set video_count = namespace(value=0) %}
+
+      {%- macro visible_text(content) -%}
+          {%- if content is string -%}
+              {{- content }}
+          {%- elif content is iterable and content is not mapping -%}
+              {%- for item in content -%}
+                  {%- if item is mapping and item.type == 'text' -%}
+                      {{- item.text }}
+                  {%- elif item is mapping and (item.type == 'image' or 'image' in item) -%}
+                      {%- set image_count.value = image_count.value + 1 -%}
+                      {%- if add_vision_id -%}{{- 'Picture ' + image_count.value|string + ': ' }}{%- endif -%}
+                      {{- '<|vision_start|><|image_pad|><|vision_end|>' }}
+                  {%- elif item is mapping and (item.type == 'video' or 'video' in item) -%}
+                      {%- set video_count.value = video_count.value + 1 -%}
+                      {%- if add_vision_id -%}{{- 'Video ' + video_count.value|string + ': ' }}{%- endif -%}
+                      {{- '<|vision_start|><|video_pad|><|vision_end|>' }}
+                  {%- elif item is string -%}
+                      {{- item }}
+                  {%- endif -%}
+              {%- endfor -%}
+          {%- else -%}
+              {{- content }}
+          {%- endif -%}
+      {%- endmacro -%}
+
+      {{- '<|im_start|>system\n' }}
+      {%- if messages[0]['role'] == 'system' -%}
+          {{- visible_text(messages[0]['content']) }}
+      {%- else -%}
+          {{- 'You are a helpful assistant.' }}
+      {%- endif -%}
+
+      {%- if tools -%}
+          {{- "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" }}
+          {%- for tool in tools -%}
+              {{- "\n" + (tool | tojson) }}
+          {%- endfor -%}
+          {{- "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>" }}
+      {%- endif -%}
+      {{- '<|im_end|>\n' }}
+
+      {%- for message in messages -%}
+          {%- if message.role == "user" -%}
+              {{- '<|im_start|>' + message.role + '\n' + visible_text(message.content) + '<|im_end|>\n' }}
+
+          {%- elif message.role == "assistant" -%}
+              {{- '<|im_start|>' + message.role + '\n' + visible_text(message.content) }}
+              {%- for tool_call in message.tool_calls -%}
+                  {%- if tool_call.function -%}
+                      {%- set tool_call = tool_call.function -%}
+                  {%- endif -%}
+                  {{- '\n<tool_call>\n{"name": "' + tool_call.name + '", "arguments": ' + (tool_call.arguments | tojson) + '}\n</tool_call>' }}
+              {%- endfor -%}
+              {{- '<|im_end|>\n' }}
+
+          {%- elif message.role == "tool" -%}
+              {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != "tool") -%}
+                  {{- '<|im_start|>user' }}
+              {%- endif -%}
+              {{- '\n<tool_response>\n' + visible_text(message.content) + '\n</tool_response>' }}
+              {%- if loop.last or (messages[loop.index0 + 1].role != "tool") -%}
+                  {{- '<|im_end|>\n' }}
+              {%- endif -%}
+          {%- endif -%}
+      {%- endfor -%}
+
+      {%- if add_generation_prompt -%}
+          {{- '<|im_start|>assistant\n' }}
+      {%- endif -%}
+    use_remove_padding: true
+    use_fused_kernels: true
+  actor:
+    optim:
+      lr: 1e-6
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 1
+    use_kl_loss: false
+    entropy_coeff: 0.0
+    fsdp_config:
+      param_offload: true
+      optimizer_offload: true
+    checkpoint:
+      save_contents: ['model','optimizer','extra','hf_model']
+  rollout:
+    name: sglang
+    mode: async
+    dtype: bfloat16
+    gpu_memory_utilization: 0.65
+    tensor_model_parallel_size: 2
+    max_num_batched_tokens: 16384
+    log_prob_micro_batch_size_per_gpu: 1
+    n: 8
+    val_kwargs:
+      n: 1
+      do_sample: false
+    multi_turn:
+      enable: true
+      max_assistant_turns: 8
+      tool_config_path: "recipe/spec_o3/configs/spectral_visualization_tool_config.yaml"
+      max_tool_response_length: 1024
+    agent:
+      num_workers: 2
+
+custom_reward_function:
+  path: "recipe/spec_o3/spec_o3.py"
+  name: compute_score
+
+algorithm:
+  adv_estimator: grpo
+  kl_ctrl:
+    kl_coef: 0.0
+
+trainer:
+  total_epochs: 3
+  logger: ['console','swanlab']
+  log_val_generations: 8
+  rollout_data_dir: /path/to/your/rollout_data
+  validation_data_dir: /path/to/your/validation_data
+  save_freq: 10
+  test_freq: 10
+  val_before_train: false
+  val_only: false
+  max_actor_ckpt_to_keep: 1
+  # resume_mode: resume_path
+  # resume_from_path: /path/to/your/checkpoint
